@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cross the Court</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&display=swap" rel="stylesheet">
+<style>
+  :root { --ink:#1d1230; --purple:#552583; --gold:#fdb927; --white:#fff; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--ink); }
+  body { display:grid; place-items:center; font-family:"Bungee","Arial Black",Impact,sans-serif; color:var(--white); overflow:hidden; }
+  .stage { position:relative; line-height:0; }
+  canvas { display:block; height:100dvh; max-height:calc(100vw * 624 / 432); aspect-ratio:432/624; width:auto; touch-action:none; }
+  .hud { position:absolute; inset:0 0 auto 0; display:flex; justify-content:space-between; align-items:flex-start; padding:12px 14px; pointer-events:none; line-height:1; text-shadow:0 2px 0 rgba(0,0,0,.45); }
+  .score { font-size:clamp(40px,11vw,56px); color:var(--gold); }
+  .meta { text-align:right; font-size:13px; letter-spacing:.04em; }
+  .meta span { display:block; margin-bottom:6px; }
+  .overlay { position:absolute; inset:0; display:grid; place-items:center; background:rgba(29,18,48,.72); line-height:1.3; padding:20px; }
+  .overlay[hidden] { display:none; }
+  .panel { background:var(--purple); border:4px solid var(--gold); border-radius:14px; padding:24px 22px; text-align:center; max-width:340px; box-shadow:0 8px 0 rgba(0,0,0,.35); }
+  .panel h1 { margin:0 0 10px; font-size:30px; font-weight:400; color:var(--gold); }
+  .panel p { margin:0 0 18px; font-family:system-ui,sans-serif; font-size:15px; line-height:1.45; }
+  .panel button { font:inherit; font-size:20px; background:var(--gold); color:var(--ink); border:0; border-radius:10px; padding:12px 26px; cursor:pointer; box-shadow:0 4px 0 #b57f0f; }
+  .panel button:active { transform:translateY(3px); box-shadow:0 1px 0 #b57f0f; }
+  .panel button:focus-visible { outline:3px solid var(--white); outline-offset:3px; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <canvas id="c" aria-label="Cross the Court game"></canvas>
+  <div class="hud">
+    <div class="score" id="score">0</div>
+    <div class="meta"><span id="name"></span><span id="best"></span></div>
+  </div>
+  <div class="overlay" id="overlay">
+    <div class="panel">
+      <h1 id="ovTitle"></h1>
+      <p id="ovText"></p>
+      <button id="ovBtn" type="button">Play</button>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  // ---- Change these to customize your player --------------------------------
+  const CONFIG = {
+    title: "Cross the Court",
+    playerName: "THE KING",
+    number: "23",
+    jersey: "#552583",
+    trim: "#fdb927",
+    skin: "#8d5a3b",
+    hair: "#1b120d",
+  };
+  // ----------------------------------------------------------------------------
+
+  const COLS = 9, T = 48, VIEW = 13, W = COLS * T, H = VIEW * T, LOOP = COLS + 6, HOP = 0.12;
+  const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+  cv.width = W; cv.height = H;
+
+  const $ = id => document.getElementById(id);
+  const scoreEl = $("score"), bestEl = $("best"), overlay = $("overlay");
+  $("name").textContent = CONFIG.playerName;
+  document.title = CONFIG.title;
+
+  let best = 0;
+  try { best = Number(localStorage.getItem("cross-court-best")) || 0; } catch (e) {}
+  bestEl.textContent = "Best " + best;
+
+  const CAR_COLORS = ["#e2483d", "#2f7de1", "#eeeeee", "#7a3fd1", "#2aa876", "#ff8a2b"];
+  const EMPTY_COURT = { type: "court", r: -1, items: [], block: [], dir: 1, speed: 0 };
+
+  let rows, genTo, pr, px, fromX, fromR, hopT, camRow, score, started;
+  let state = "ready", deadKind = "", deadT = 0, canRestart = false, time = 0;
+
+  function makeRow(r) {
+    const p1 = rows[r - 1], p2 = rows[r - 2];
+    let type = "court";
+    if (r > 2) {
+      const roll = Math.random();
+      type = roll < 0.28 ? "court" : roll < 0.75 ? "road" : "water";
+      if (type === "water" && p1 && p2 && p1.type === "water" && p2.type === "water") type = "road";
+      if (type === "court" && p1 && p2 && p1.type === "court" && p2.type === "court") type = "road";
+    }
+    const row = { type, r, items: [], block: [], dir: Math.random() < 0.5 ? -1 : 1, speed: 0 };
+    const diff = Math.min(r / 80, 1);
+    if (type === "court" && r > 2) {
+      const n = 1 + Math.floor(Math.random() * 3);
+      while (row.block.length < n) {
+        const c = Math.floor(Math.random() * COLS);
+        if (!row.block.includes(c)) row.block.push(c);
+      }
+    } else if (type === "road") {
+      row.speed = 1.5 + Math.random() * 1.5 + diff * 1.5;
+      const count = Math.random() < 0.5 ? 3 : 2, spacing = LOOP / count;
+      for (let i = 0; i < count; i++) {
+        const bus = Math.random() < 0.3;
+        row.items.push({
+          x: -3 + i * spacing + Math.random() * 0.8,
+          w: bus ? 2.4 : 1.3,
+          kind: bus ? "bus" : "car",
+          color: bus ? "#f2b705" : CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)],
+        });
+      }
+    } else if (type === "water") {
+      row.speed = 0.9 + Math.random() * 0.9 + diff * 0.6;
+      for (let i = 0; i < 3; i++) {
+        row.items.push({ x: -3 + i * 5 + Math.random() * 0.6, w: 2 + Math.random(), kind: "log" });
+      }
+    }
+    return row;
+  }
+
+  function ensure(r) { while (genTo < r) { genTo++; rows[genTo] = makeRow(genTo); } }
+  function getRow(r) { if (r < 0) return EMPTY_COURT; ensure(r); return rows[r]; }
+
+  function reset() {
+    rows = {}; genTo = -1;
+    pr = 0; px = 4; fromX = 4; fromR = 0; hopT = 0;
+    camRow = -3; score = 0; started = false;
+    scoreEl.textContent = "0";
+    ensure(VIEW + 4);
+  }
+
+  function showOverlay(title, text, btn) {
+    $("ovTitle").textContent = title;
+    $("ovText").textContent = text;
+    $("ovBtn").textContent = btn;
+    overlay.hidden = false;
+    $("ovBtn").focus({ preventScroll: true });
+  }
+
+  function die(kind) {
+    if (state !== "play") return;
+    state = "dead"; deadKind = kind; deadT = 0; canRestart = false;
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem("cross-court-best", String(best)); } catch (e) {}
+    }
+    bestEl.textContent = "Best " + best;
+    const why = { car: "Hit by a car.", water: "Fell in the water.", slow: "Fell behind. Keep moving." }[kind];
+    setTimeout(() => {
+      canRestart = true;
+      showOverlay("Game over", why + " You reached row " + score + ".", "Play again");
+    }, 700);
+  }
+
+  function start() {
+    if (state === "play") return;
+    if (state === "dead") { if (!canRestart) return; reset(); }
+    state = "play";
+    overlay.hidden = true;
+  }
+
+  function blocked(row, c) { return row.type === "court" && row.block.includes(Math.round(c)); }
+
+  function move(dx, dy) {
+    if (state !== "play" || hopT > 0.04) return;
+    let nc = px, nr = pr;
+    if (dy !== 0) {
+      nr = pr + dy;
+      if (nr < 0) return;
+      const target = getRow(nr);
+      nc = target.type === "water" ? px : Math.round(px);
+      if (blocked(target, nc)) return;
+    } else {
+      const cur = getRow(pr);
+      nc = (cur.type === "water" ? px : Math.round(px)) + dx;
+      if (nc < 0 || nc > COLS - 1) return;
+      if (blocked(cur, nc)) return;
+    }
+    fromX = px; fromR = pr;
+    px = nc; pr = nr; hopT = HOP;
+    started = true;
+    if (pr > score) { score = pr; scoreEl.textContent = String(score); }
+  }
+
+  // ---- Input -----------------------------------------------------------------
+  const KEYS = {
+    ArrowUp: [0, 1], KeyW: [0, 1], ArrowDown: [0, -1], KeyS: [0, -1],
+    ArrowLeft: [-1, 0], KeyA: [-1, 0], ArrowRight: [1, 0], KeyD: [1, 0],
+  };
+  addEventListener("keydown", e => {
+    if (KEYS[e.code]) { e.preventDefault(); move(...KEYS[e.code]); return; }
+    if ((e.code === "Space" || e.code === "Enter") && state !== "play") { e.preventDefault(); start(); }
+  });
+  $("ovBtn").addEventListener("click", start);
+
+  let down = null;
+  cv.addEventListener("pointerdown", e => { down = { x: e.clientX, y: e.clientY }; });
+  cv.addEventListener("pointerup", e => {
+    if (!down) return;
+    const dx = e.clientX - down.x, dy = e.clientY - down.y;
+    down = null;
+    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) move(0, 1);
+    else if (Math.abs(dx) > Math.abs(dy)) move(dx > 0 ? 1 : -1, 0);
+    else move(0, dy < 0 ? 1 : -1);
+  });
+
+  // ---- Update ----------------------------------------------------------------
+  function updateWorld(dt) {
+    const lo = Math.floor(camRow) - 2, hi = Math.ceil(camRow) + VIEW + 3;
+    ensure(hi);
+    for (let r = Math.max(0, lo); r <= hi; r++) {
+      const row = rows[r];
+      for (const it of row.items) {
+        it.x += row.dir * row.speed * dt;
+        if (row.dir > 0 && it.x > COLS + 3) it.x -= LOOP;
+        if (row.dir < 0 && it.x < -3) it.x += LOOP;
+      }
+    }
+  }
+
+  function update(dt) {
+    time += dt;
+    updateWorld(dt);
+    if (state === "dead") { deadT += dt; return; }
+    if (state !== "play") return;
+
+    if (hopT > 0) hopT = Math.max(0, hopT - dt);
+
+    const row = getRow(pr);
+    if (row.type === "water") {
+      const cx = px + 0.5;
+      const log = row.items.find(it => cx >= it.x + 0.05 && cx <= it.x + it.w - 0.05);
+      if (!log) return die("water");
+      px += row.dir * row.speed * dt;
+      if (px < -0.6 || px > COLS - 0.4) return die("water");
+    } else if (row.type === "road") {
+      const l = px + 0.18, r = px + 0.82;
+      if (row.items.some(it => l < it.x + it.w - 0.05 && r > it.x + 0.05)) return die("car");
+    }
+
+    const creep = started ? 0.3 + Math.min(score * 0.004, 0.35) : 0;
+    const want = Math.max(camRow, pr - 3);
+    camRow += (want - camRow) * Math.min(1, dt * 8) + creep * dt;
+    if (pr + 0.5 < camRow) die("slow");
+  }
+
+  // ---- Drawing ---------------------------------------------------------------
+  const sy = r => H - (r - camRow + 1) * T;
+
+  function rr(x, y, w, h, rad) {
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
+  }
+
+  function drawCourtRow(row, y) {
+    ctx.fillStyle = row.r % 2 ? "#c8924f" : "#bf8745";
+    ctx.fillRect(0, y, W, T);
+    ctx.strokeStyle = "rgba(80,45,15,.2)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < 5; i++) { const x = (row.r * 47 + i * 131) % W; ctx.moveTo(x, y); ctx.lineTo(x, y + T); }
+    ctx.stroke();
+    ctx.fillStyle = "rgba(0,0,0,.12)"; ctx.fillRect(0, y + T - 2, W, 2);
+    if (row.r >= 0 && row.r % 6 === 0) { ctx.fillStyle = "rgba(255,255,255,.55)"; ctx.fillRect(0, y + T / 2 - 2, W, 4); }
+  }
+
+  function drawRoadRow(row, y) {
+    ctx.fillStyle = "#3b3e49"; ctx.fillRect(0, y, W, T);
+    if (getRow(row.r - 1).type === "road") {
+      ctx.strokeStyle = "rgba(255,255,255,.55)"; ctx.lineWidth = 3; ctx.setLineDash([14, 12]);
+      ctx.beginPath(); ctx.moveTo(0, y + T); ctx.lineTo(W, y + T); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+
+  function drawWaterRow(row, y) {
+    ctx.fillStyle = "#1f8fb5"; ctx.fillRect(0, y, W, T);
+    ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const x = (((i * 83 + row.r * 37 + time * 18 * row.dir) % W) + W) % W;
+      const yy = y + T * (i % 2 ? 0.7 : 0.3);
+      ctx.moveTo(x, yy); ctx.lineTo(x + 14, yy);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "rgba(0,0,0,.12)"; ctx.fillRect(0, y + T - 3, W, 3);
+  }
+
+  function drawLog(it, y) {
+    const x = it.x * T, w = it.w * T;
+    ctx.fillStyle = "rgba(0,0,0,.18)"; rr(x + 2, y + 11, w, T - 14, 8); ctx.fill();
+    ctx.fillStyle = "#8a5a2b"; rr(x, y + 7, w, T - 14, 8); ctx.fill();
+    ctx.fillStyle = "#a8723a"; rr(x + 3, y + 10, w - 6, 9, 5); ctx.fill();
+    ctx.strokeStyle = "#6b431c"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x + 9, y + T / 2, 6, 0, Math.PI * 2); ctx.arc(x + w - 9, y + T / 2, 6, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  function drawVehicle(it, row, y) {
+    const x = it.x * T, w = it.w * T, by = y + T - 12;
+    ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.fillRect(x + 3, by - 2, w, 6);
+    if (it.kind === "bus") {
+      ctx.fillStyle = it.color; rr(x, by - 30, w, 28, 5); ctx.fill();
+      ctx.fillStyle = "#bfe6f5";
+      for (let k = 0; k < Math.floor((w - 12) / 22); k++) ctx.fillRect(x + 8 + k * 22, by - 25, 15, 9);
+      ctx.fillStyle = "#552583"; ctx.fillRect(x, by - 12, w, 4);
+    } else {
+      ctx.fillStyle = it.color; rr(x, by - 16, w, 14, 4); ctx.fill();
+      rr(x + w * (row.dir > 0 ? 0.15 : 0.3), by - 27, w * 0.55, 13, 4); ctx.fill();
+      ctx.fillStyle = "#bfe6f5"; ctx.fillRect(x + w * (row.dir > 0 ? 0.22 : 0.37), by - 24, w * 0.4, 7);
+    }
+    ctx.fillStyle = "#14141a";
+    ctx.beginPath(); ctx.arc(x + w * 0.22, by - 2, 5, 0, Math.PI * 2); ctx.arc(x + w * 0.78, by - 2, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffe37a"; ctx.fillRect(row.dir > 0 ? x + w - 4 : x, by - 12, 4, 4);
+  }
+
+  function drawHoop(c, y) {
+    const x = c * T;
+    ctx.fillStyle = "#2b2d36"; rr(x + 10, y + T - 13, T - 20, 10, 3); ctx.fill();
+    ctx.fillStyle = "#3b3f4a"; ctx.fillRect(x + T / 2 - 3, y + 6, 6, T - 18);
+    ctx.fillStyle = "#ffffff"; rr(x + 7, y - 16, T - 14, 22, 3); ctx.fill();
+    ctx.strokeStyle = "#e0482c"; ctx.lineWidth = 2; ctx.strokeRect(x + 16, y - 8, T - 32, 11);
+    ctx.strokeStyle = "#ff6a1a"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(x + T / 2, y + 9, 11, 4, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let k = -1; k <= 1; k++) { ctx.moveTo(x + T / 2 + k * 7, y + 10); ctx.lineTo(x + T / 2 + k * 4, y + 20); }
+    ctx.stroke();
+  }
+
+  function drawPlayer() {
+    const prog = hopT > 0 ? 1 - hopT / HOP : 1;
+    const vx = fromX + (px - fromX) * prog, vr = fromR + (pr - fromR) * prog;
+    const lift = Math.sin(Math.PI * prog) * 14;
+    const x = vx * T, top = sy(vr), cx = x + T / 2;
+    let base = top + T * 0.86 - lift;
+
+    ctx.fillStyle = "rgba(0,0,0,.25)";
+    ctx.beginPath(); ctx.ellipse(cx, top + T * 0.88, 14 - lift * 0.3, 5, 0, 0, Math.PI * 2); ctx.fill();
+
+    if (state === "dead" && deadKind === "water") {
+      for (let i = 0; i < 3; i++) {
+        const p = Math.min(1, Math.max(0, deadT * 1.6 - i * 0.25));
+        ctx.strokeStyle = "rgba(255,255,255," + (0.7 * (1 - p)) + ")"; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.ellipse(cx, top + T * 0.7, 6 + p * 24, 3 + p * 10, 0, 0, Math.PI * 2); ctx.stroke();
+      }
+      if (deadT > 0.15) return;
+    }
+
+    ctx.save();
+    if (state === "dead" && deadKind === "car") {
+      ctx.translate(cx, base); ctx.scale(1.35, Math.max(0.2, 1 - deadT * 6)); ctx.translate(-cx, -base);
+    }
+    ctx.fillStyle = CONFIG.skin;
+    ctx.fillRect(cx - 9, base - 10, 8, 10); ctx.fillRect(cx + 1, base - 10, 8, 10);
+    ctx.fillStyle = "#fff"; ctx.fillRect(cx - 10, base - 3, 10, 3); ctx.fillRect(cx, base - 3, 10, 3);
+    ctx.fillStyle = CONFIG.trim; ctx.fillRect(cx - 12, base - 21, 24, 12);
+    ctx.fillStyle = CONFIG.skin; ctx.fillRect(cx - 18, base - 38, 5, 15); ctx.fillRect(cx + 13, base - 38, 5, 15);
+    ctx.fillStyle = CONFIG.jersey; ctx.fillRect(cx - 13, base - 39, 26, 19);
+    ctx.fillStyle = CONFIG.trim; ctx.fillRect(cx - 13, base - 39, 26, 2); ctx.fillRect(cx - 13, base - 22, 26, 2);
+    ctx.font = "bold 12px Arial Black, Impact, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(CONFIG.number, cx, base - 30);
+    ctx.fillStyle = CONFIG.skin; ctx.fillRect(cx - 9, base - 58, 18, 19);
+    ctx.fillStyle = CONFIG.hair; ctx.fillRect(cx - 9, base - 58, 18, 5);
+    ctx.fillStyle = CONFIG.trim; ctx.fillRect(cx - 9, base - 52, 18, 4);
+    ctx.fillStyle = "#1b120d"; ctx.fillRect(cx - 5, base - 46, 3, 3); ctx.fillRect(cx + 2, base - 46, 3, 3);
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    const lo = Math.floor(camRow) - 1, hi = Math.ceil(camRow) + VIEW + 1;
+    for (let r = hi; r >= lo; r--) {
+      const row = getRow(r), y = sy(r);
+      if (row.type === "court") drawCourtRow(row, y);
+      else if (row.type === "road") drawRoadRow(row, y);
+      else drawWaterRow(row, y);
+      if (row.type === "water") for (const it of row.items) drawLog(it, y);
+      if (row.type === "road") for (const it of row.items) drawVehicle(it, row, y);
+      if (row.type === "court") for (const c of row.block) drawHoop(c, y);
+      if (r === pr || (hopT > 0 && r === fromR && false)) { /* player drawn below, sorted by row */ }
+      if (r === pr) drawPlayer();
+    }
+  }
+
+  // ---- Loop ------------------------------------------------------------------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  reset();
+  showOverlay(CONFIG.title, "Arrow keys, WASD, or swipe to hop. Tap to hop forward. Dodge traffic, ride the logs, and keep moving.", "Play");
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
